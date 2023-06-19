@@ -1,0 +1,11 @@
+T G "div_t" 1 34 "{sint8 quot,sint8 rem}" `38 
+D G "__PCH__" 1 36 ""5.101""
+D G "__DEVICE__" 1 36 ""
+D G "__DATE__" 1 36 ""19-Apr-23""
+D G "__TIME__" 1 36 ""16:38:14""
+D G "_UNICODE" 1 36 ""?""
+D G "__EVAL" 1 36 ""?""
+D G "WProgram_h" 0 2 ""
+D G "_STDLIB" 1 13 ""
+D G "RAND_MAX" 1 20 "32767" "The value of which is the maximum value"
+D G "LONG_POINTERS" 1 26 "1"
