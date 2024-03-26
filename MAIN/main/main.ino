@@ -1,7 +1,7 @@
 #include <PID_v1.h>
 #include <LMotorController.h>
 #include "I2Cdev.h"
-
+#include <SoftwareSerial.h>
 #include "MPU6050_6Axis_MotionApps20.h"
 
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
@@ -9,52 +9,37 @@
 #endif
 
 
-#define LOG_INPUT 0
-#define MANUAL_TUNING 0
-#define LOG_PID_CONSTANTS 0 //MANUAL_TUNING must be 1
-#define MOVE_BACK_FORTH 0
-
-#define MIN_ABS_SPEED 30
-
 //MPU
-
-
 MPU6050 mpu;
+SoftwareSerial mySerial(3, 4); // RX, TX
+// kiểm soát MPU tình trạng có
+bool dmpReady = false;  // đặt true nếu init DMP thành công
+uint8_t mpuIntStatus;   // giữ byte trạng thái ngắt thực tế từ MPU
+uint8_t devStatus;      // trạng thái trả về sau mỗi thao tác thiết bị (0 = thành công,! 0 = lỗi)
+uint16_t packetSize;    // kích thước gói DMP dự kiến (mặc định là 42 byte)
+uint16_t fifoCount;     // count của tất cả các byte hiện tại trong FIFO
+uint8_t fifoBuffer[64]; // Bộ đệm lưu trữ FIFO
 
-// MPU control/status vars
-bool dmpReady = false;  // set true if DMP init was successful
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-// orientation/motion vars
-Quaternion q;           // [w, x, y, z]         quaternion container
-VectorFloat gravity;    // [x, y, z]            gravity vector
-float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-
+// định hướng / chuyển động
+Quaternion q;           // [w, x, y, z]         vùng chứa thứ ba
+VectorFloat gravity;    // [x, y, z]            vector trọng lực
+float ypr[3];           // [yaw, pitch, roll] yaw / pitch / roll container và vector trọng lực
 
 //PID
 
-
-#if MANUAL_TUNING
-  double kp , ki, kd;
-  double prevKp, prevKi, prevKd;
-#endif
-double originalSetpoint = 174.2;
+double originalSetpoint = 176.5;
 double setpoint = originalSetpoint;
-double movingAngleOffset = 0.3;
+//double movingAngleOffset = 0.3;
 double input, output;
 int moveState=0; //0 = balance; 1 = back; 2 = forth
 
-double Kp = 30;//45;   30
-double Kd = 2;//1.7    2
-double Ki = 150;//140    150
+double Kp = 10.5;//45;   30
+double Kd = 0.5;//1.7    2
+double Ki = 60;//140    150
 PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
-double motorSpeedFactorLeft = 0.6;
-double motorSpeedFactorRight = 0.6;//0.6
+char data;
+int spd=255;
 //MOTOR CONTROLLER
 
 
@@ -66,16 +51,7 @@ int IN4 = 8;
 int ENB = 10;
 
 
-LMotorController motorController(ENA, IN1, IN2, ENB, IN3, IN4, motorSpeedFactorLeft, motorSpeedFactorRight);
-
-//timers
-
-
-long time1Hz = 0;
-long time5Hz = 0;
-
-
-volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+volatile bool mpuInterrupt = false;     //  // cho biết liệu pin ngắt MPU có cao không
 void dmpDataReady()
 {
     mpuInterrupt = true;
@@ -84,6 +60,13 @@ void dmpDataReady()
 void setup()
 {
 
+    pinMode (IN1, OUTPUT);
+    pinMode (IN2, OUTPUT);
+    pinMode (IN3, OUTPUT);
+    pinMode (IN4, OUTPUT);
+    pinMode (ENA, OUTPUT);
+    pinMode (ENB, OUTPUT);
+    
     // join I2C bus (I2Cdev library doesn't do this automatically)
     #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
         Wire.begin();
@@ -92,53 +75,49 @@ void setup()
         Fastwire::setup(400, true);
     #endif
 
-    // initialize serial communication
-    // (115200 chosen because it is required for Teapot Demo output, but it's
-    // really up to you depending on your project)
+    mySerial.begin(9600);// giao tieps blutooth baut=9600
     Serial.begin(115200);
     while (!Serial); // wait for Leonardo enumeration, others continue immediately
+      
+  // khởi tạo thiết bị
+    Serial.println(F("Khởi tạo thiết bị I2C ..."));
+    mpu.initialize();// xác minh kết nối
 
-    // initialize device
-    Serial.println(F("Initializing I2C devices..."));
-    mpu.initialize();
-
-    // verify connection
-    Serial.println(F("Testing device connections..."));
-    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
-
+    Serial.println(F("Kiểm tra kết nối thiết bị ..."));
+    Serial.println (mpu.testConnection ()? F ("Kết nối thành công MPU6050"): F ("Kết nối MPU6050 không thành công"));
     // load and configure the DMP
-    Serial.println(F("Initializing DMP..."));
+    Serial.println(F("Khởi tạo DMP..."));
     devStatus = mpu.dmpInitialize();
 
-    // supply your own gyro offsets here, scaled for min sensitivity
+    // cung cấp bù lệch con quay hồi chuyển chỉnh tỷ lệ cho độ nhạy tối thiểu
     mpu.setXGyroOffset(220);
     mpu.setYGyroOffset(76);
     mpu.setZGyroOffset(-85);
     mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
 
-    // make sure it worked (returns 0 if so)
+ // đảm bảo nó hoạt động (trả về 0 nếu có)
     if (devStatus == 0)
     {
-        // turn on the DMP, now that it's ready
-        Serial.println(F("Enabling DMP..."));
+        // bật DMP, bây giờ nó đã sẵn sàng
+        Serial.println(F ("Kích hoạt DMP ..."));
         mpu.setDMPEnabled(true);
-
-        // enable Arduino interrupt detection
-        Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+        // bật phát hiện ngắt Arduino
+        
+        //Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
         attachInterrupt(0, dmpDataReady, RISING);
         mpuIntStatus = mpu.getIntStatus();
 
-        // set our DMP Ready flag so the main loop() function knows it's okay to use it
+        // đặt cờ DMP Ready để chức năng vòng lặp chính ()
         Serial.println(F("DMP ready! Waiting for first interrupt..."));
         dmpReady = true;
 
-        // get expected DMP packet size for later comparison
+         // nhận kích thước gói DMP dự kiến để so sánh sau
         packetSize = mpu.dmpGetFIFOPacketSize();
         
         //setup PID
         
         pid.SetMode(AUTOMATIC);
-        pid.SetSampleTime(10);
+        pid.SetSampleTime(5);
         pid.SetOutputLimits(-255, 255);  
     }
     else
@@ -147,7 +126,7 @@ void setup()
         // 1 = initial memory load failed
         // 2 = DMP configuration updates failed
         // (if it's going to break, usually the code will be 1)
-        Serial.print(F("DMP Initialization failed (code "));
+       Serial.print (F ("Khởi tạo DMP không thành công mã"));
         Serial.print(devStatus);
         Serial.println(F(")"));
     }
@@ -155,119 +134,173 @@ void setup()
 
 }
 
-
 void loop()
 {
+      //  if (BluetoothSerial.available() )
+      //       {
+      //       data=BluetoothSerial.read();
+      //       //BluetoothSerial.println(data);
+            if (mySerial.available()) {
+    data=mySerial.read();
+  }
+            
+            
+            else setpoint= 176.5;//176.8//cho can bang tai cho
+            if(data=='F')
+            {
+              setpoint= 177.7;/////178.7;
+               //Serial.println(setpoint);
+                    //mySerial.println(data);
+              }
+            else if(data=='B')
+              {
+              setpoint= 175.7;
+              //Serial.println(setpoint);
+              //mySerial.println(data);    
+            }
+            else if(data=='L')//////Rẽ trai
+            {
+              //Serial.println(output);
+            
+              digitalWrite(IN1, HIGH);
+              digitalWrite(IN2, LOW);
+              digitalWrite(IN3, LOW);
+              digitalWrite(IN4, HIGH);
+              analogWrite(ENA,spd-15);
+              analogWrite(ENB,spd-15);
+            
+
+            }
+            else if(data=='R')//////Rẽ phải
+            { 
+              //Serial.println(output);
+              //mySerial.println(data);
+              digitalWrite(IN1, LOW);
+              digitalWrite(IN2, HIGH);
+              digitalWrite(IN3, HIGH);
+              digitalWrite(IN4, LOW);
+              analogWrite(ENA,spd-15);
+              analogWrite(ENB,spd-15);
+              
+            }
+            else if(data=='O')
+            {
+             // Serial.println(data);
+              setpoint= 176.8; ///cho xe can bang 
+    //           digitalWrite(IN1, LOW);
+    //  digitalWrite(IN2, LOW);
+    //  digitalWrite(IN3, LOW);
+    //  digitalWrite(IN4, LOW);
+     //analogWrite(ENA,0);
+     //analogWrite(ENB,0);
+            }
 
   
-    // if programming failed, don't try to do anything
+    // nếu lập trình không thành công, đừng cố làm gì cả 
     if (!dmpReady) return;
 
-    // wait for MPU interrupt or extra packet(s) available
+    {
+   // chờ đợi cho MPU ngắt hoặc gói thêm (s) có sẵn
     while (!mpuInterrupt && fifoCount < packetSize)
     {
-        //no mpu data - performing PID calculations and output to motors
+       // không có dữ liệu mpu - thực hiện các phép tính PID và đầu ra cho các động cơ
         
         pid.Compute();
-        motorController.move(output, MIN_ABS_SPEED);
-        
-        unsigned long currentMillis = millis();
-
-        if (currentMillis - time1Hz >= 1000)
+        //motorController.move(output, MIN_ABS_SPEED);
+        if (input>150 && input<220) 
         {
-            loopAt1Hz();
-            time1Hz = currentMillis;
+          setpoint= 176.5;//176.8
+          
+          // Nếu robot đang nghiêng
+        if (output>0) //Nghiêng về phía trước
+        Forward(); //Xoay bánh xe về phía trước
+        else if (output<0) //Nghiêng về phía sau
+        Reverse(); //Xoay bánh xe về phía sau
         }
-        
-        if (currentMillis - time5Hz >= 5000)
-        {
-            loopAt5Hz();
-            time5Hz = currentMillis;
-        }
+        else //Nếu robot không nghiêng
+        Stop();//Giữ bánh xe
+        //dọng cơ khong hoạt dong
+    
+    }
+         
     }
 
-    // reset interrupt flag and get INT_STATUS byte
+     // đặt lại cờ ngắt và nhận byte INT_STATUS
     mpuInterrupt = false;
     mpuIntStatus = mpu.getIntStatus();
-
-    // get current FIFO count
+    // nhận số FIFO hiện tại
     fifoCount = mpu.getFIFOCount();
-
-    // check for overflow (this should never happen unless our code is too inefficient)
+    // kiểm tra tràn 
     if ((mpuIntStatus & 0x10) || fifoCount == 1024)
     {
-        // reset so we can continue cleanly
+        // đặt lại để chúng tôi có thể tiếp tục sạch
         mpu.resetFIFO();
         Serial.println(F("FIFO overflow!"));
-
-    // otherwise, check for DMP data ready interrupt (this should happen frequently)
+         // nếu không, hãy kiểm tra dữ liệu DMP sẵn sàng gián đoạn (điều này sẽ xảy ra thường xuyên)
     }
     else if (mpuIntStatus & 0x02)
     {
-        // wait for correct available data length, should be a VERY short wait
+         // chờ cho độ dài dữ liệu có sẵn chính xác, phải chờ đợi rất ngắn
         while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
-
-        // read a packet from FIFO
+        // đọc một gói từ FIFO
         mpu.getFIFOBytes(fifoBuffer, packetSize);
-        
-        // track FIFO count here in case there is > 1 packet available
-        // (this lets us immediately read more without waiting for an interrupt)
+       // theo dõi FIFO đếm ở đây trong trường hợp có sẵn> 1 gói
+        // (điều này cho phép chúng tôi ngay lập tức đọc thêm mà không phải chờ gián đoạn)
         fifoCount -= packetSize;
 
-        mpu.dmpGetQuaternion(&q, fifoBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        #if LOG_INPUT
-            Serial.print("ypr\t");
-            Serial.print(ypr[0] * 180/M_PI);
-            Serial.print("\t");
-            Serial.print(ypr[1] * 180/M_PI);
-            Serial.print("\t");
-            Serial.println(ypr[2] * 180/M_PI);
-        #endif
+        mpu.dmpGetQuaternion(&q, fifoBuffer);// lấy giá trị cho q
+        mpu.dmpGetGravity(&gravity, &q);// lấy giá trị cho lực hấp dẫn
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);// nhận giá trị cho ypr
+        
         input = ypr[1] * 180/M_PI + 180;
    }
-     Serial.print("Setpoint:");
+    
+   //bluetoothSerial.print("Input:");
+   Serial.print("Setpoint:");
    Serial.print(setpoint);
    Serial.print("\t");
    Serial.print(",");
    Serial.print("Input:");
     Serial.println(input);
-   // bluetoothSerial.print("Input:");
+   //Serial.print("Output:");
+   //Serial.println(output);
+
 }
-
-
-void loopAt1Hz()
+void Forward()  //Code xoay bánh xe về phía trước
 {
-#if MANUAL_TUNING
-    setPIDTuningValues();
-#endif
+    //analogWrite(4,output*1.25);
+   // analogWrite(5,0);
+   // analogWrite(6,output*1.25);
+    //analogWrite(7,0);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENA,output*1.5);
+    analogWrite(ENB,output*1.5);
+
+
 }
-
-
-void loopAt5Hz()
+void Reverse() //Code xoay bánh xe lùi
 {
-    #if MOVE_BACK_FORTH
-        moveBackForth();
-    #endif
+   // analogWrite(4,0);
+    //analogWrite(5,output*-1.5);
+    //analogWrite(6,0);
+    //analogWrite(7,output*-1.5); 
+     digitalWrite(IN1, LOW);
+     digitalWrite(IN2, HIGH);
+     digitalWrite(IN3, LOW);
+     digitalWrite(IN4, HIGH);
+     analogWrite(ENA,output*-1.5);
+     analogWrite(ENB,output*-1.5);
+
 }
-
-
-//move back and forth
-
-
-void moveBackForth()
+void Stop() //Code dừng cả hai bánh xe
 {
-    moveState++;
-    if (moveState > 2) moveState = 0;
-    
-    if (moveState == 0)
-      setpoint = originalSetpoint;
-    else if (moveState == 1)
-      setpoint = originalSetpoint - movingAngleOffset;
-    else
-      setpoint = originalSetpoint + movingAngleOffset;
+    digitalWrite(IN1, LOW);
+     digitalWrite(IN2, LOW);
+     digitalWrite(IN3, LOW);
+     digitalWrite(IN4, LOW);
+     analogWrite(ENA,0);
+     analogWrite(ENB,0);
 }
-
-
-//PID Tuning (3 potentiometers)
